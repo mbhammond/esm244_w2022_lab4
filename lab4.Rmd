@@ -1,0 +1,146 @@
+---
+title: "lab4"
+author: "Margaret Hammond"
+date: "1/26/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(Metrics)
+library(cowplot)
+library(purrr)
+library(here)
+```
+
+
+```{r}
+load(here("fish_data.Rdata"))
+```
+
+### Compute surplus
+
+```{r}
+surplus <- Fish_data %>% 
+  group_by(stockid) %>% 
+  select(stockid, year, TBbest, TCbest) %>% 
+  drop_na() %>% 
+  mutate(f_biomass = lead(TBbest)) %>% 
+  mutate(surplus = f_biomass - TBbest + TCbest) %>% 
+  drop_na() %>% 
+  select(-f_biomass)
+```
+
+### Build a Fox Model
+
+
+```{r}
+fox <- function(m,carry,biomass) {
+  out = - 2.718*m*(biomass/carry)*log(biomass/carry)
+  return(out)
+}
+```
+
+
+```{r}
+one_stock <- surplus %>% 
+  filter(stockid == "COD1f-XIV")
+
+ggplot(data = one_stock, aes(x = year, y = surplus)) +
+  geom_point(size = 3) +
+  theme_minimal()
+
+```
+
+
+### Single species nls
+
+```{r}
+guess_vec = c(max(one_stock$TBbest)*.37, max(one_stock$TBbest))
+
+one_stock_nls=nls(surplus~fox(m,carry,TBbest),
+                  data=one_stock,
+                  start=list(m=guess_vec[1],carry=guess_vec[2]),
+                  trace=TRUE)
+
+summary(one_stock_nls)
+```
+
+### Using purrr to run many nls models
+
+```{r}
+all_nls_fcn <- function(surplus_df) {
+  nls(surplus~fox(m,carry,TBbest),
+      data = surplus_df,
+      start = list(m=max(surplus_df$TBbest)*0.37, carry = max(surplus_df$TBbest)))
+}
+
+fox_all <- surplus %>% 
+  group_by(stockid) %>% 
+  nest() %>% 
+  mutate(nls_model=map(data,~all_nls_fcn(.x))) %>% 
+  mutate(predictions = map2(nls_model, data,~predict(.x, newdata=.y))) %>% 
+  mutate(RMSE = map2_dbl(predictions, data, ~rmse(.x, .y$surplus)))
+
+
+
+```
+
+
+### Compare to null model
+
+```{r}
+r_avg <- function(surplus) {
+  avg_sur = mean(surplus)
+  
+  rmse=sqrt(mean((avg_sur-surplus)^2))
+  
+  return(rmse)
+}
+
+r_mse <- surplus %>% 
+  group_by(stockid) %>% 
+  nest() %>% 
+  mutate(RMSE = map_dbl(data,~r_avg(.x$surplus)))
+
+
+which(r_mse$RMSE<fox_all$RMSE)
+
+fox_all$stockid[39]
+
+```
+
+### Let's make a graph of the top 5 best fit nls models
+
+
+```{r}
+plots<-fox_all %>% 
+  arrange(RMSE) %>% 
+  head(5) %>% 
+  mutate(graph=map2(data,predictions,~ggplot()+
+                      geom_point(data=.x, aes(x=.x$year,y=.x$surplus,color="Actual")) +
+                      geom_point(aes(x=.x$year,y=.y,color="Predicted")) +
+                      theme_minimal() +
+                      xlab('Year') +
+                      ylab('Surplus') +
+                      scale_color_manual(name = 'Legend', breaks=c('Actual', 'Predicted'), values=c('Actual' = 'black', 'Predicted' = 'red'))))
+
+legend<-get_legend(plots$graph[[1]])
+
+for(i in 1:length(plots$graph)) {
+  plots$graph[[i]]<-plots$graph[[i]]+theme(legend.position = "none")
+}
+
+plot_list=plots$graph
+
+plot_list[[6]] <- legend
+
+plot_grid(plotlist = plot_list, labels = c(plots$stockid,''), hjust = -0.5)
+```
+
+
+
+
+
